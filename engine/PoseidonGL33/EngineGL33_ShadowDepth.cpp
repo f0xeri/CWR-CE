@@ -3,9 +3,9 @@
 
 #include <glad/gl.h>
 
-#include <Poseidon/Graphics/Core/GLClear.hpp>
-#include <Poseidon/Graphics/Core/GLCullState.hpp>
-#include <Poseidon/Graphics/Core/GLDepthStencilState.hpp>
+#include <PoseidonGL33/GLClear.hpp>
+#include <PoseidonGL33/GLCullState.hpp>
+#include <PoseidonGL33/GLDepthStencilState.hpp>
 #include <Poseidon/Graphics/Shared/PNGWriter.hpp>
 #include <PoseidonGL33/TextureGL33.hpp>
 

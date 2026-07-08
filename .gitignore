@@ -6,6 +6,9 @@
 **/vcpkg_installed/
 CMakeUserPresets.json
 
+# Editor
+/.vscode/
+
 # Local/runtime output
 /tmp/
 /logs/

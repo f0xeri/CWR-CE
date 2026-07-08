@@ -1,12 +1,12 @@
 #include <PoseidonGL33/EngineGL33.hpp>
 #include <PoseidonGL33/GL33BindCache.hpp>
 #include <PoseidonGL33/TextureGL33.hpp>
-#include <Poseidon/Graphics/Core/GLBlendState.hpp>
-#include <Poseidon/Graphics/Core/GLClear.hpp>
-#include <Poseidon/Graphics/Core/GLCullState.hpp>
-#include <Poseidon/Graphics/Core/GLDepthStencilState.hpp>
-#include <Poseidon/Graphics/Core/GLPipelineState.hpp>
-#include <Poseidon/Graphics/Core/GLSampler.hpp>
+#include <PoseidonGL33/GLBlendState.hpp>
+#include <PoseidonGL33/GLClear.hpp>
+#include <PoseidonGL33/GLCullState.hpp>
+#include <PoseidonGL33/GLDepthStencilState.hpp>
+#include <PoseidonGL33/GLPipelineState.hpp>
+#include <PoseidonGL33/GLSampler.hpp>
 #include <Poseidon/Graphics/Shared/RenderDocCapture.hpp>
 #include <Poseidon/Graphics/Rendering/ValidateRenderPassDescriptor.hpp>
 

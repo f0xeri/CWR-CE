@@ -3,10 +3,10 @@
 #include <PoseidonGL33/TextureGL33.hpp>
 #include <Poseidon/Graphics/Rendering/Shape/Shape.hpp>
 #include <Poseidon/Graphics/Rendering/Primitives/Poly.hpp>
-#include <Poseidon/Graphics/Core/GLBufferMap.hpp>
-#include <Poseidon/Graphics/Core/GLClear.hpp>
-#include <Poseidon/Graphics/Core/GLIndexBuffer.hpp>
-#include <Poseidon/Graphics/Core/GLPipelineState.hpp>
+#include <PoseidonGL33/GLBufferMap.hpp>
+#include <PoseidonGL33/GLClear.hpp>
+#include <PoseidonGL33/GLIndexBuffer.hpp>
+#include <PoseidonGL33/GLPipelineState.hpp>
 #include <PoseidonGL33/GLVertexAttribLayouts.hpp>
 #include <Poseidon/Graphics/Rendering/Frame/Frame.hpp>
 #include <Poseidon/Graphics/Shared/ScreenshotWriter.hpp>
@@ -80,7 +80,7 @@ void VertexBufferGL33::CopyVertices(const Shape& src)
     // INVALIDATE (B-028) or a dynamic buffer without it — picking the
     // wrong helper is the only way to land in the bug class, and the
     // helper name makes the mistake glaring.  See
-    // `engine/Poseidon/Graphics/Core/GLBufferMap.hpp`.
+    // `engine/PoseidonGL33/GLBufferMap.hpp`.
     void* mapped = _dynamic ? Poseidon::render::buf::MapDynamicWriteInvalidate(GL_ARRAY_BUFFER, 0, _vertexCount * sizeof(SVertex))
                             : Poseidon::render::buf::MapStaticWriteOnce(GL_ARRAY_BUFFER);
     SVertex* sData = static_cast<SVertex*>(mapped);
