@@ -104,4 +104,5 @@ class Engine* CreateEngineGL33(int, int, bool, int)
 namespace Poseidon
 {
 void RegisterGL33GraphicsBackend() {}
+void RegisterVulkanGraphicsBackend() {}
 } // namespace Poseidon

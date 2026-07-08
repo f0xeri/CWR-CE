@@ -10,15 +10,17 @@
     "stb",
     "mimalloc",
     "zstd",
-    { "name": "sdl3", "version>=": "3.4.10#1" },
+    { "name": "sdl3", "version>=": "3.4.10#1", "features": ["vulkan"] },
     "openal-soft",
     "opus",
     "libogg",
     "libvorbis",
     "enkits",
+    "vulkan-headers",
+    "vulkan-memory-allocator",
     {
       "name": "imgui",
-      "features": ["sdl3-binding", "sdl3-renderer-binding", "opengl3-binding", "freetype"]
+      "features": ["sdl3-binding", "sdl3-renderer-binding", "opengl3-binding", "vulkan-binding", "freetype"]
     },
     {
       "name": "spdlog",

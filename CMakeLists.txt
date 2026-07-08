@@ -193,6 +193,7 @@ set(DIST_DIR "${CMAKE_SOURCE_DIR}/dist/${DIST_PRESET_NAME}")
 
 add_subdirectory(engine/Poseidon)
 add_subdirectory(engine/PoseidonGL33)
+add_subdirectory(engine/PoseidonVulkan)
 add_subdirectory(engine/PoseidonOpenAL)
 add_subdirectory(engine/PoseidonFormats)
 add_subdirectory(tests/unit/engine/Poseidon/Foundation)
@@ -230,7 +231,7 @@ register_trident_integration_ctests()
 # into the PCH, so a shared blob would be rejected. Trivial 1-2 TU targets
 # (TcPbo, TcLister) and the standalone PoseidonFormats C-API are excluded.
 set(POSEIDON_PCH_TARGETS
-    PoseidonGL33 PoseidonOpenAL GameBase
+    PoseidonGL33 PoseidonVulkan PoseidonOpenAL GameBase
     PoseidonGame PoseidonGameDemo PoseidonServer PoseidonTools
     PoseidonStudio PoseidonEvaluator PoseidonTetris
     PoseidonTests PoseidonCoreTests PoseidonFoundationTests
