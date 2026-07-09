@@ -6,6 +6,7 @@ set(POSEIDON_VULKAN_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/EngineVulkan.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/VulkanContext.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/VulkanSwapchain.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/VulkanShaderCompiler.hpp
 )
 
 add_library(PoseidonVulkan STATIC
@@ -15,11 +16,15 @@ add_library(PoseidonVulkan STATIC
 
 find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(glslang CONFIG REQUIRED)
 
 target_link_libraries(PoseidonVulkan PUBLIC Poseidon)
 target_link_libraries(PoseidonVulkan PRIVATE
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
+    glslang::glslang
+    glslang::glslang-default-resource-limits
+    glslang::SPIRV
 )
 
 # Vulkan-Hpp dynamic dispatch
