@@ -66,7 +66,7 @@ EngineVulkan::EngineVulkan(int width, int height, bool windowed, int bpp)
             break;
     }
 
-    _sdlWindow = SDL_CreateWindow("Poseidon [VK]", placement.width, placement.height, flags);
+    _sdlWindow = SDL_CreateWindow("Poseidon [Vulkan 1.3]", placement.width, placement.height, flags);
     if (!_sdlWindow)
     {
         LOG_ERROR(Graphics, "VK: SDL_CreateWindow failed: {}", SDL_GetError());
@@ -102,6 +102,17 @@ EngineVulkan::EngineVulkan(int width, int height, bool windowed, int bpp)
         return;
     }
 
+    if (!_swapchain.Create(_vk, _sdlWindow) || !CreateFrameResources())
+    {
+        LOG_ERROR(Graphics, "VK: swapchain/frame setup failed — engine unusable");
+        DestroyFrameResources();
+        _swapchain.Destroy(_vk);
+        _vk.Shutdown();
+        SDL_DestroyWindow(_sdlWindow);
+        _sdlWindow = nullptr;
+        return;
+    }
+
     int cw = 0, ch = 0;
     SDL_GetWindowSizeInPixels(_sdlWindow, &cw, &ch);
     _w = cw;
@@ -111,9 +122,6 @@ EngineVulkan::EngineVulkan(int width, int height, bool windowed, int bpp)
     _eventWindow.Attach(_sdlWindow, _w, _h);
 
     LoadConfig();
-
-    // TODO(vk-phase0): swapchain + per-frame command buffers/sync, then Clear
-    // gets a real implementation and the window shows its first pixels.
 }
 
 EngineVulkan::~EngineVulkan()
@@ -122,6 +130,12 @@ EngineVulkan::~EngineVulkan()
     delete _bank;
     _bank = nullptr;
     _eventWindow.Detach();
+    if (_vk.IsValid())
+    {
+        _vk.device.waitIdle(); // in-flight submits may still reference frame resources
+        DestroyFrameResources();
+        _swapchain.Destroy(_vk);
+    }
     _vk.Shutdown();
     if (_sdlWindow)
     {
@@ -142,13 +156,11 @@ RString EngineVulkan::GetRendererName() const
     return "Vulkan 1.3";
 }
 
-// ── Frame cycle ─────────────────────────────────────────────────────────────
+// Frame cycle (InitDraw/FinishDraw/NextFrame/Clear/OnWindowResized) lives in
+// EngineVulkan_Frame.cpp.
 
-void EngineVulkan::InitDraw() {}
-void EngineVulkan::FinishDraw() {}
 void EngineVulkan::Pause() {}
 void EngineVulkan::Restore() {}
-void EngineVulkan::Clear(bool, bool, PackedColor) {}
 void EngineVulkan::DrawPicture555(unsigned short*) {}
 
 // ── Lighting / atmosphere hooks ─────────────────────────────────────────────

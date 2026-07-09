@@ -3,6 +3,7 @@
 #include <Poseidon/Graphics/Core/Engine.hpp>
 #include <PoseidonGL33/SDLEventWindow.hpp>
 #include "VulkanContext.hpp"
+#include "VulkanSwapchain.hpp"
 
 struct SDL_Window;
 
@@ -13,9 +14,8 @@ class TextBankVulkan;
 class EngineVulkan : public Engine
 {
   private:
-    // TODO(vk-phase1): real TextBankVulkan; until then a TextBankDummy keeps
-    // the producer layer alive (Scene::Init etc. dereference TextBank()
-    // unconditionally).
+    // TODO(vk-phase1): TextBankVulkan; TextBankDummy for now — the producer
+    // layer dereferences TextBank() unconditionally.
     AbstractTextBank* _bank;
 
   public:
@@ -26,9 +26,12 @@ class EngineVulkan : public Engine
 
     RString GetDebugName() const override;
     RString GetRendererName() const override;
-    using Engine::InitDraw;
-    void InitDraw();
+    void InitDraw(bool clear = false, PackedColor color = PackedColor(0)) override;
+    bool InitDrawDone() override;
+    bool IsAbleToDraw() override { return IsUsable(); }
     void FinishDraw() override;
+    void NextFrame() override;
+    void OnWindowResized(int w, int h) override;
     void Pause() override;
     void Restore() override;
     void DrawPicture555(unsigned short*);
@@ -122,6 +125,29 @@ class EngineVulkan : public Engine
     SDL_Window* _sdlWindow = nullptr;
     SDLEventWindow _eventWindow;
     VulkanContext _vk;
+    VulkanSwapchain _swapchain;
+
+    static constexpr int kFramesInFlight = 2;
+    struct FrameResources
+    {
+        vk::CommandPool pool;
+        vk::CommandBuffer cmd;
+        vk::Fence inFlight;
+        vk::Semaphore imageAvailable;
+    };
+    FrameResources _frames[kFramesInFlight];
+    int _frameIndex = 0;
+    uint32_t _imageIndex = 0;
+    // Same contract as GL33's _frameOpen; the extra _frameRecorded step exists
+    // because in Vulkan the closed command buffer still has to be submitted.
+    bool _frameOpen = false;     // between successful InitDraw and FinishDraw
+    bool _frameRecorded = false; // between FinishDraw and NextFrame
+    bool _swapchainDirty = false; // rebuild before next acquire
+    PackedColor _clearColor{0xFF203040u};
+
+    bool CreateFrameResources();
+    void DestroyFrameResources();
+    void RecreateSwapchain();
 };
 
 Engine* CreateEngineVulkan(int w, int h, bool windowed, int bpp);
