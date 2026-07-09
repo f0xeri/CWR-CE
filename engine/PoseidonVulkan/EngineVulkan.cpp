@@ -1,4 +1,5 @@
 #include "EngineVulkan.hpp"
+#include "TextureVulkan.hpp"
 
 #include <Poseidon/Core/Application.hpp>
 #include <Poseidon/Core/Config/EngineConfig.hpp>
@@ -102,9 +103,10 @@ EngineVulkan::EngineVulkan(int width, int height, bool windowed, int bpp)
         return;
     }
 
-    if (!_swapchain.Create(_vk, _sdlWindow) || !CreateFrameResources())
+    if (!_swapchain.Create(_vk, _sdlWindow) || !CreateFrameResources() || !InitPipelineResources())
     {
-        LOG_ERROR(Graphics, "VK: swapchain/frame setup failed — engine unusable");
+        LOG_ERROR(Graphics, "VK: swapchain/frame/pipeline setup failed — engine unusable");
+        DestroyPipelineResources();
         DestroyFrameResources();
         _swapchain.Destroy(_vk);
         _vk.Shutdown();
@@ -112,6 +114,11 @@ EngineVulkan::EngineVulkan(int width, int height, bool windowed, int bpp)
         _sdlWindow = nullptr;
         return;
     }
+    ResetPSConstantDefaults();
+
+    // GPU is alive: swap the bootstrap TextBankDummy for the real bank.
+    delete _bank;
+    _bank = new TextBankVulkan(this);
 
     int cw = 0, ch = 0;
     SDL_GetWindowSizeInPixels(_sdlWindow, &cw, &ch);
@@ -127,12 +134,16 @@ EngineVulkan::EngineVulkan(int width, int height, bool windowed, int bpp)
 EngineVulkan::~EngineVulkan()
 {
     ClearFontCache();
+    // Bank teardown pushes surface images into the deferred-delete queues;
+    // they are flushed below once the device is idle.
     delete _bank;
     _bank = nullptr;
     _eventWindow.Detach();
     if (_vk.IsValid())
     {
         _vk.device.waitIdle(); // in-flight submits may still reference frame resources
+        FlushAllDeferredDestroys();
+        DestroyPipelineResources();
         DestroyFrameResources();
         _swapchain.Destroy(_vk);
     }
@@ -163,27 +174,148 @@ void EngineVulkan::Pause() {}
 void EngineVulkan::Restore() {}
 void EngineVulkan::DrawPicture555(unsigned short*) {}
 
-// ── Lighting / atmosphere hooks ─────────────────────────────────────────────
+// ── Lighting / atmosphere hooks (FogColorChanged lives in _Shaders.cpp) ─────
 
-void EngineVulkan::FogColorChanged(const Color&) {}
 void EngineVulkan::LightChanged(const Color&, const Color&) {}
 void EngineVulkan::NightEffectChanged(float) {}
 
 // ── Display modes ───────────────────────────────────────────────────────────
+// Unlike GL33 there is no context reset dance: every path just moves the SDL
+// window and marks the swapchain dirty; the next InitDraw rebuilds it at the
+// surface's new size (RecreateSwapchain also resizes the depth target).
 
-bool EngineVulkan::SwitchRes(int, int, int)
+bool EngineVulkan::ApplyExclusiveFullscreen(int w, int h, int refresh)
 {
-    return false; // TODO swapchain recreation
+    SDL_DisplayID display = SDL_GetDisplayForWindow(_sdlWindow);
+    if (!display)
+        display = SDL_GetPrimaryDisplay();
+    SDL_DisplayMode mode;
+    if (SDL_GetClosestFullscreenDisplayMode(display, w, h, (float)refresh, false, &mode))
+    {
+        if (!SDL_SetWindowFullscreenMode(_sdlWindow, &mode))
+            LOG_WARN(Graphics, "VK: SDL_SetWindowFullscreenMode failed for {}x{}@{}: {}", w, h, refresh,
+                     SDL_GetError());
+    }
+    else
+    {
+        LOG_WARN(Graphics, "VK: no fullscreen mode close to {}x{}@{} — using desktop mode", w, h, refresh);
+        SDL_SetWindowFullscreenMode(_sdlWindow, nullptr);
+    }
+    return SDL_SetWindowFullscreen(_sdlWindow, true);
 }
 
-bool EngineVulkan::SwitchRefreshRate(int)
+bool EngineVulkan::SwitchRes(int w, int h, int bpp)
 {
-    return false;
+    if (!_sdlWindow)
+        return false;
+    _pixelSize = bpp;
+
+    if (_windowed)
+    {
+        SDL_SetWindowSize(_sdlWindow, w, h);
+        _windowedRestoreW = w;
+        _windowedRestoreH = h;
+    }
+    else if (_windowMode == WindowMode::Fullscreen)
+    {
+        if (!ApplyExclusiveFullscreen(w, h, _refreshRate))
+            LOG_WARN(Graphics, "VK: SDL_SetWindowFullscreen failed: {}", SDL_GetError());
+    }
+    // Borderless always covers the monitor — a resolution request is a no-op.
+
+    SDL_GetWindowSizeInPixels(_sdlWindow, &_w, &_h);
+    _swapchainDirty = true;
+    LOG_INFO(Graphics, "VK: SwitchRes {}x{} {}bpp -> surface {}x{}", w, h, bpp, _w, _h);
+    return true;
 }
 
-bool EngineVulkan::SetWindowMode(WindowMode)
+bool EngineVulkan::SwitchRefreshRate(int refresh)
 {
-    return false; // TODO needs swapchain recreation on transition
+    if (refresh == 0)
+        return false;
+    if (_refreshRate == refresh)
+        return true;
+    _refreshRate = refresh;
+    if (_windowed || _windowMode != WindowMode::Fullscreen)
+        return true;
+    if (ApplyExclusiveFullscreen(_w, _h, refresh))
+        _swapchainDirty = true;
+    return true;
+}
+
+bool EngineVulkan::SetWindowMode(WindowMode mode)
+{
+    if (!_sdlWindow)
+        return false;
+    if (_windowed && mode != WindowMode::Windowed)
+        SDL_GetWindowSize(_sdlWindow, &_windowedRestoreW, &_windowedRestoreH);
+    _windowMode = mode;
+
+    switch (mode)
+    {
+        case WindowMode::Windowed:
+            SDL_SetWindowFullscreen(_sdlWindow, false);
+            SDL_SetWindowBordered(_sdlWindow, true);
+            SDL_SetWindowResizable(_sdlWindow, true);
+            if (_windowedRestoreW > 0 && _windowedRestoreH > 0)
+                SDL_SetWindowSize(_sdlWindow, _windowedRestoreW, _windowedRestoreH);
+            SDL_SetWindowPosition(_sdlWindow, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+            _windowed = true;
+            break;
+        case WindowMode::Borderless:
+            // Desktop-fullscreen: nullptr mode keeps the desktop resolution.
+            SDL_SetWindowFullscreenMode(_sdlWindow, nullptr);
+            if (!SDL_SetWindowFullscreen(_sdlWindow, true))
+                LOG_WARN(Graphics, "VK: borderless switch failed: {}", SDL_GetError());
+            _windowed = false;
+            break;
+        case WindowMode::Fullscreen:
+            if (!ApplyExclusiveFullscreen(_w, _h, _refreshRate))
+                LOG_WARN(Graphics, "VK: exclusive fullscreen switch failed: {}", SDL_GetError());
+            _windowed = false;
+            break;
+    }
+
+    SDL_GetWindowSizeInPixels(_sdlWindow, &_w, &_h);
+    _swapchainDirty = true;
+    LOG_INFO(Graphics, "VK: SetWindowMode {} -> surface {}x{}",
+             mode == WindowMode::Fullscreen   ? "fullscreen"
+             : mode == WindowMode::Borderless ? "borderless"
+                                              : "windowed",
+             _w, _h);
+    return true;
+}
+
+bool EngineVulkan::SetSwapInterval(int interval)
+{
+    if (_swapInterval == interval)
+        return true;
+    _swapInterval = interval;
+    _swapchainDirty = true; // present mode is baked into the swapchain
+    LOG_INFO(Graphics, "VK: swap interval {} — swapchain rebuild scheduled", interval);
+    return true;
+}
+
+bool EngineVulkan::GetDesktopDisplayMode(int& w, int& h, int& refresh) const
+{
+    SDL_DisplayID display = _sdlWindow ? SDL_GetDisplayForWindow(_sdlWindow) : SDL_GetPrimaryDisplay();
+    const SDL_DisplayMode* dm = SDL_GetDesktopDisplayMode(display ? display : SDL_GetPrimaryDisplay());
+    if (!dm)
+        return false;
+    w = dm->w;
+    h = dm->h;
+    refresh = (int)(dm->refresh_rate + 0.5f);
+    return true;
+}
+
+bool EngineVulkan::GetRequestedFullscreenMode(int& w, int& h, int& refresh) const
+{
+    if (_windowed)
+        return false;
+    w = _w;
+    h = _h;
+    refresh = _refreshRate;
+    return true;
 }
 
 void EngineVulkan::HandleEvents()
@@ -378,23 +510,11 @@ float EngineVulkan::GetGamma() const
     return _gamma;
 }
 
-// ── Draw path stubs (phase 1: 2D/UI, phase 2: world) ────────────────────────
+// ── Remaining draw-path stubs (2D/soup paths live in EngineVulkan_2D.cpp) ───
 
-void EngineVulkan::BeginMesh(TLVertexTable&, const render::LegacySpec&) {}
-void EngineVulkan::EndMesh(TLVertexTable&) {}
-void EngineVulkan::PrepareMesh(const render::LegacySpec&) {}
 void EngineVulkan::PrepareTriangle(const PacLevelMem*, int) {}
-void EngineVulkan::PrepareTriangle(const MipInfo&, int) {}
-void EngineVulkan::DrawPolygon(const VertexIndex*, int) {}
 void EngineVulkan::DrawPolygon(TLVertexTable&, const short*, int) {}
-void EngineVulkan::DrawSection(const FaceArray&, Offset, Offset) {}
-void EngineVulkan::DrawDecal(Vector3Par, float, float, float, PackedColor, const MipInfo&, int) {}
 void EngineVulkan::Draw2D(const PacLevelMem*, PackedColor, float, float, float, float, float, float, float, float) {}
-void EngineVulkan::Draw2D(const Draw2DPars&, const Rect2DAbs&, const Rect2DAbs&) {}
-void EngineVulkan::DrawLine(int, int) {}
-void EngineVulkan::DrawLine(const Line2DAbs&, PackedColor, PackedColor, const Rect2DAbs&) {}
-void EngineVulkan::DrawPoly(const MipInfo&, const Vertex2DPixel*, int, const Rect2DPixel&, int) {}
-void EngineVulkan::DrawPoly(const MipInfo&, const Vertex2DAbs*, int, const Rect2DAbs&, int) {}
 
 AbstractTextBank* EngineVulkan::TextBank()
 {

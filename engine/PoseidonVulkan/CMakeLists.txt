@@ -6,7 +6,9 @@ set(POSEIDON_VULKAN_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/EngineVulkan.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/VulkanContext.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/VulkanSwapchain.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/VulkanShaderCompiler.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/TextureVulkan.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Utils/VulkanShaderCompiler.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Utils/VulkanBuffer.hpp
 )
 
 add_library(PoseidonVulkan STATIC

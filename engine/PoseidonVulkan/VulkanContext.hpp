@@ -29,9 +29,7 @@ class VulkanContext
     vk::Device device;
 
     vk::Queue graphicsQueue;
-    vk::Queue presentQueue;
     uint32_t graphicsQueueFamily = kNoQueueFamily;
-    uint32_t presentQueueFamily = kNoQueueFamily;
 
     VmaAllocator allocator = nullptr;
 };

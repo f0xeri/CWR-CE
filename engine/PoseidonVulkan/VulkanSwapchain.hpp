@@ -14,7 +14,7 @@ class VulkanSwapchain
   public:
     // Create() also rebuilds: the existing handle goes in as oldSwapchain.
     // Returns false when the window is minimized (0x0) or creation failed.
-    bool Create(VulkanContext& ctx, SDL_Window* window);
+    bool Create(VulkanContext& ctx, SDL_Window* window, int swapInterval = 1);
     void Destroy(VulkanContext& ctx);
 
     bool IsValid() const { return static_cast<bool>(swapchain); }

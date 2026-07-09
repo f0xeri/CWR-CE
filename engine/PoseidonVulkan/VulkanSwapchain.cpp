@@ -20,10 +20,23 @@ vk::SurfaceFormatKHR ChooseSurfaceFormat(const std::vector<vk::SurfaceFormatKHR>
     return formats.front();
 }
 
-// FIFO (vsync on) is the only mode guaranteed everywhere; SetSwapInterval
-// mapping to MAILBOX/IMMEDIATE comes later.
-vk::PresentModeKHR ChoosePresentMode(const std::vector<vk::PresentModeKHR>&)
+// GL swap-interval semantics: 1 = vsync (FIFO, guaranteed everywhere),
+// 0 = uncapped (IMMEDIATE, falling back to MAILBOX which is uncapped but
+// tear-free), -1 = adaptive (FIFO_RELAXED).
+vk::PresentModeKHR ChoosePresentMode(const std::vector<vk::PresentModeKHR>& modes, int swapInterval)
 {
+    auto has = [&](vk::PresentModeKHR m) { return std::find(modes.begin(), modes.end(), m) != modes.end(); };
+    if (swapInterval == 0)
+    {
+        if (has(vk::PresentModeKHR::eImmediate))
+            return vk::PresentModeKHR::eImmediate;
+        if (has(vk::PresentModeKHR::eMailbox))
+            return vk::PresentModeKHR::eMailbox;
+    }
+    else if (swapInterval < 0 && has(vk::PresentModeKHR::eFifoRelaxed))
+    {
+        return vk::PresentModeKHR::eFifoRelaxed;
+    }
     return vk::PresentModeKHR::eFifo;
 }
 
@@ -42,13 +55,14 @@ vk::Extent2D ChooseExtent(const vk::SurfaceCapabilitiesKHR& caps, SDL_Window* wi
 namespace Poseidon
 {
 
-bool VulkanSwapchain::Create(VulkanContext& ctx, SDL_Window* window)
+bool VulkanSwapchain::Create(VulkanContext& ctx, SDL_Window* window, int swapInterval)
 {
     try
     {
         const auto caps = ctx.physicalDevice.getSurfaceCapabilitiesKHR(ctx.surface);
         const auto surfaceFormat = ChooseSurfaceFormat(ctx.physicalDevice.getSurfaceFormatsKHR(ctx.surface));
-        const auto presentMode = ChoosePresentMode(ctx.physicalDevice.getSurfacePresentModesKHR(ctx.surface));
+        const auto presentMode =
+            ChoosePresentMode(ctx.physicalDevice.getSurfacePresentModesKHR(ctx.surface), swapInterval);
         const vk::Extent2D newExtent = ChooseExtent(caps, window);
         if (newExtent.width == 0 || newExtent.height == 0)
             return false; // minimized — caller retries later
@@ -63,15 +77,6 @@ bool VulkanSwapchain::Create(VulkanContext& ctx, SDL_Window* window)
             /*imageArrayLayers=*/1, vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst,
             vk::SharingMode::eExclusive, nullptr, caps.currentTransform, vk::CompositeAlphaFlagBitsKHR::eOpaque,
             presentMode, /*clipped=*/true, /*oldSwapchain=*/swapchain);
-
-        // Concurrent when families differ: avoids explicit ownership transfers
-        const uint32_t families[2] = {ctx.graphicsQueueFamily, ctx.presentQueueFamily};
-        if (ctx.graphicsQueueFamily != ctx.presentQueueFamily)
-        {
-            ci.imageSharingMode = vk::SharingMode::eConcurrent;
-            ci.queueFamilyIndexCount = 2;
-            ci.pQueueFamilyIndices = families;
-        }
 
         vk::SwapchainKHR newSwapchain = ctx.device.createSwapchainKHR(ci);
 

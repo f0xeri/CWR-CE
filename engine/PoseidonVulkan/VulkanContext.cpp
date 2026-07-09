@@ -40,29 +40,15 @@ bool HasLayer(const char* name)
     return false;
 }
 
-struct QueueFamilies
+uint32_t FindCombinedQueueFamily(vk::PhysicalDevice dev, vk::SurfaceKHR surface)
 {
-    uint32_t graphics = kNoQueueFamily;
-    uint32_t present = kNoQueueFamily;
-
-    bool Complete() const { return graphics != kNoQueueFamily && present != kNoQueueFamily; }
-};
-
-QueueFamilies FindQueueFamilies(vk::PhysicalDevice dev, vk::SurfaceKHR surface)
-{
-    QueueFamilies out;
-    const auto families = dev.getQueueFamilyProperties();
+    const auto families = dev.getQueueFamilyProperties2();
     for (uint32_t i = 0; i < (uint32_t)families.size(); ++i)
     {
-        if (out.graphics == kNoQueueFamily && (families[i].queueFlags & vk::QueueFlagBits::eGraphics))
-            out.graphics = i;
-        if (out.present == kNoQueueFamily && dev.getSurfaceSupportKHR(i, surface))
-            out.present = i;
+        if ((families[i].queueFamilyProperties.queueFlags & vk::QueueFlagBits::eGraphics) && dev.getSurfaceSupportKHR(i, surface))
+            return i;
     }
-    // Prefer presenting from the graphics family when it can.
-    if (out.graphics != kNoQueueFamily && dev.getSurfaceSupportKHR(out.graphics, surface))
-        out.present = out.graphics;
-    return out;
+    return kNoQueueFamily;
 }
 
 bool SupportsRequiredFeatures(vk::PhysicalDevice dev)
@@ -141,7 +127,7 @@ vk::SurfaceKHR CreateWindowSurface(SDL_Window* window, vk::Instance instance)
 struct GpuPick
 {
     vk::PhysicalDevice device;
-    QueueFamilies families;
+    uint32_t queueFamily = kNoQueueFamily;
 };
 
 GpuPick PickPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surface)
@@ -152,32 +138,24 @@ GpuPick PickPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surface)
     {
         if (!SupportsRequiredFeatures(dev))
             continue;
-        const QueueFamilies families = FindQueueFamilies(dev, surface);
-        if (!families.Complete())
+        const uint32_t family = FindCombinedQueueFamily(dev, surface);
+        if (family == kNoQueueFamily)
             continue;
         const int score = (dev.getProperties().deviceType == vk::PhysicalDeviceType::eDiscreteGpu) ? 1000 : 100;
         if (score > bestScore)
         {
             bestScore = score;
             best.device = dev;
-            best.families = families;
+            best.queueFamily = family;
         }
     }
     return best;
 }
 
-vk::Device CreateLogicalDevice(vk::PhysicalDevice physicalDevice, const QueueFamilies& families)
+vk::Device CreateLogicalDevice(vk::PhysicalDevice physicalDevice, uint32_t queueFamily)
 {
     const float queuePriority = 1.0f;
-    std::vector<vk::DeviceQueueCreateInfo> queueInfos;
-    for (const uint32_t family : {families.graphics, families.present})
-    {
-        bool seen = false;
-        for (const auto& qi : queueInfos)
-            seen |= (qi.queueFamilyIndex == family);
-        if (!seen)
-            queueInfos.emplace_back(vk::DeviceQueueCreateFlags{}, family, 1, &queuePriority);
-    }
+    const vk::DeviceQueueCreateInfo queueInfo({}, queueFamily, 1, &queuePriority);
     const char* deviceExts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
     vk::PhysicalDeviceVulkan13Features features13;
@@ -186,7 +164,7 @@ vk::Device CreateLogicalDevice(vk::PhysicalDevice physicalDevice, const QueueFam
     vk::PhysicalDeviceFeatures baseFeatures;
     baseFeatures.samplerAnisotropy = physicalDevice.getFeatures().samplerAnisotropy;
 
-    vk::DeviceCreateInfo deviceInfo({}, queueInfos, {}, deviceExts, &baseFeatures);
+    vk::DeviceCreateInfo deviceInfo({}, 1, &queueInfo, 0, nullptr, 1, deviceExts, &baseFeatures);
     deviceInfo.pNext = &features13;
     vk::Device device = physicalDevice.createDevice(deviceInfo);
     VULKAN_HPP_DEFAULT_DISPATCHER.init(device); // device-level functions, bypassing loader trampolines
@@ -226,7 +204,10 @@ bool VulkanContext::Init(SDL_Window* window)
         if (!InitDispatcher())
             return false;
 
-        const bool wantValidation = HasLayer(kValidationLayer);
+        // Validation costs a large chunk of frame time — opt-in only.
+        // Set CWR_VK_VALIDATION=1 to enable (requires the Vulkan SDK layer).
+        const char* envValidation = std::getenv("CWR_VK_VALIDATION");
+        const bool wantValidation = envValidation && *envValidation == '1' && HasLayer(kValidationLayer);
         instance = CreateInstance(wantValidation);
         if (!instance)
             return false;
@@ -241,21 +222,19 @@ bool VulkanContext::Init(SDL_Window* window)
         const GpuPick pick = PickPhysicalDevice(instance, surface);
         if (!pick.device)
         {
-            LOG_WARN(Graphics, "VK: no Vulkan 1.3 device with dynamic rendering found — backend unavailable");
+            LOG_WARN(Graphics,"VK: no Vulkan 1.3 device with dynamic rendering and combined graphics+present queue - backend unavailable");
             return false;
         }
         physicalDevice = pick.device;
-        graphicsQueueFamily = pick.families.graphics;
-        presentQueueFamily = pick.families.present;
+        graphicsQueueFamily = pick.queueFamily;
         deviceProps = physicalDevice.getProperties();
         LOG_INFO(Graphics, "VK: using {} (Vulkan {}.{}.{}, {})", (const char*)deviceProps.deviceName,
                  VK_API_VERSION_MAJOR(deviceProps.apiVersion), VK_API_VERSION_MINOR(deviceProps.apiVersion),
                  VK_API_VERSION_PATCH(deviceProps.apiVersion), vk::to_string(deviceProps.deviceType));
 
-        device = CreateLogicalDevice(physicalDevice, pick.families);
+        device = CreateLogicalDevice(physicalDevice, graphicsQueueFamily);
         graphicsQueue = device.getQueue(graphicsQueueFamily, 0);
-        presentQueue = device.getQueue(presentQueueFamily, 0);
-        LOG_INFO(Graphics, "VK: queue families — graphics {}, present {}", graphicsQueueFamily, presentQueueFamily);
+        LOG_INFO(Graphics, "VK: combined graphics+present queue family {}", graphicsQueueFamily);
 
         allocator = CreateAllocator(instance, physicalDevice, device);
         if (!allocator)
@@ -305,9 +284,7 @@ void VulkanContext::Shutdown()
     }
     physicalDevice = nullptr;
     graphicsQueue = nullptr;
-    presentQueue = nullptr;
     graphicsQueueFamily = kNoQueueFamily;
-    presentQueueFamily = kNoQueueFamily;
 }
 
 } // namespace Poseidon
