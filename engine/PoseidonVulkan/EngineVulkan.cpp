@@ -10,6 +10,10 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
+#ifdef _WIN32
+#include <windows.h> // hardware gamma ramp (SetDeviceGammaRamp)
+#endif
+
 namespace Poseidon
 {
 
@@ -128,6 +132,8 @@ EngineVulkan::EngineVulkan(int width, int height, bool windowed, int bpp)
 
     _eventWindow.Attach(_sdlWindow, _w, _h);
 
+    InitDebugOverlay();
+
     LoadConfig();
 }
 
@@ -142,6 +148,7 @@ EngineVulkan::~EngineVulkan()
     if (_vk.IsValid())
     {
         _vk.device.waitIdle(); // in-flight submits may still reference frame resources
+        ShutdownDebugOverlay(); // ImGui's Vulkan objects must die before the device
         FlushAllDeferredDestroys();
         DestroyPipelineResources();
         DestroyFrameResources();
@@ -502,7 +509,40 @@ int EngineVulkan::AFrameTime() const
 
 void EngineVulkan::SetGamma(float gamma)
 {
+    saturate(gamma, 1e-3f, 1e3f);
     _gamma = gamma;
+
+    // Hardware gamma ramp on the window's device context — identical to
+    // GL33's DoSetGamma; the ramp is display-level, not graphics-API-level.
+#ifdef _WIN32
+    if (!_sdlWindow)
+        return;
+    SDL_PropertiesID props = SDL_GetWindowProperties(_sdlWindow);
+    HWND hwnd = (HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (!hwnd)
+        return;
+    HDC hdc = GetDC(hwnd);
+    if (!hdc)
+        return;
+
+    WORD ramp[3][256];
+    const float eGamma = 1.0f / _gamma;
+    ramp[0][0] = ramp[1][0] = ramp[2][0] = 0;
+    for (int i = 1; i < 256; i++)
+    {
+        const float x = i * (1.0f / 255.0f);
+        const float fx = powf(x, eGamma);
+        int ifx = static_cast<int>(fx * 65535.0f);
+        if (ifx < 0)
+            ifx = 0;
+        if (ifx > 65535)
+            ifx = 65535;
+        ramp[0][i] = ramp[1][i] = ramp[2][i] = static_cast<WORD>(ifx);
+    }
+    SetDeviceGammaRamp(hdc, ramp);
+    ReleaseDC(hwnd, hdc);
+    LOG_DEBUG(Graphics, "VK: set gamma {:.3f}", _gamma);
+#endif
 }
 
 float EngineVulkan::GetGamma() const

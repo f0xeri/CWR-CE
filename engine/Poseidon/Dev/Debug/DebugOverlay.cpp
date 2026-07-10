@@ -75,6 +75,14 @@ namespace DebugOverlay
 
 namespace
 {
+enum class RendererBackend
+{
+    None,
+    OpenGL,
+    Vulkan
+};
+RendererBackend s_rendererBackend = RendererBackend::None;
+
 bool s_initialized = false;
 bool s_visible = false;
 bool s_selectShadowsTab = false; // one-shot: force-select the Shadows tab next draw
@@ -1684,10 +1692,10 @@ void DrawMainWindow()
 }
 } // namespace
 
-void Init(SDL_Window* window, void* glContext)
+namespace
 {
-    if (s_initialized)
-        return;
+void CreateSharedContext(SDL_Window* window)
+{
     s_window = window;
 
     IMGUI_CHECKVERSION();
@@ -1696,30 +1704,71 @@ void Init(SDL_Window* window, void* glContext)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr; // no imgui.ini side-effects
     ImGui::StyleColorsDark();
+}
+} // namespace
+
+void Init(SDL_Window* window, void* glContext)
+{
+    if (s_initialized)
+        return;
+    CreateSharedContext(window);
 
     if (!ImGui_ImplSDL3_InitForOpenGL(window, glContext))
     {
         LOG_ERROR(Graphics, "DebugOverlay: ImGui_ImplSDL3_InitForOpenGL failed");
+        ImGui::DestroyContext();
+        s_window = nullptr;
         return;
     }
     if (!ImGui_ImplOpenGL3_Init("#version 330"))
     {
         LOG_ERROR(Graphics, "DebugOverlay: ImGui_ImplOpenGL3_Init failed");
+        ImGui_ImplSDL3_Shutdown();
+        ImGui::DestroyContext();
+        s_window = nullptr;
         return;
     }
 
+    s_rendererBackend = RendererBackend::OpenGL;
     s_initialized = true;
     LOG_INFO(Graphics, "DebugOverlay: ImGui initialized (press Ctrl+` / Ctrl+; to toggle)");
+}
+
+void InitForVulkan(SDL_Window* window)
+{
+    if (s_initialized)
+        return;
+    CreateSharedContext(window);
+
+    if (!ImGui_ImplSDL3_InitForVulkan(window))
+    {
+        LOG_ERROR(Graphics, "DebugOverlay: ImGui_ImplSDL3_InitForVulkan failed");
+        ImGui::DestroyContext();
+        s_window = nullptr;
+        return;
+    }
+
+    s_rendererBackend = RendererBackend::Vulkan;
+    s_initialized = true;
+    LOG_INFO(Graphics, "DebugOverlay: ImGui initialized for Vulkan (press Ctrl+` / Ctrl+; to toggle)");
+}
+
+bool IsInitialized()
+{
+    return s_initialized;
 }
 
 void Shutdown()
 {
     if (!s_initialized)
         return;
-    ImGui_ImplOpenGL3_Shutdown();
+    if (s_rendererBackend == RendererBackend::OpenGL)
+        ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+    s_rendererBackend = RendererBackend::None;
     s_initialized = false;
+    s_window = nullptr;
 }
 
 void ProcessEvent(const SDL_Event& event)
@@ -1758,7 +1807,8 @@ void NewFrame()
     // after the game render), so we draw our own cursor as part of ImGui's
     // drawlist to stay on top.  When hidden, fall back to the engine cursor.
     ImGui::GetIO().MouseDrawCursor = s_visible;
-    ImGui_ImplOpenGL3_NewFrame();
+    if (s_rendererBackend == RendererBackend::OpenGL)
+        ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
     if (s_visible)
@@ -1770,11 +1820,16 @@ void Render()
     if (!s_initialized)
         return;
     ImGui::Render();
-    // Make sure we draw to the default framebuffer in case the engine left
-    // an FBO bound — happens with post-FX in GL33.  Other state (blend,
-    // scissor, vao, depth) is saved/restored inside RenderDrawData.
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    if (s_rendererBackend == RendererBackend::OpenGL)
+    {
+        // Make sure we draw to the default framebuffer in case the engine left
+        // an FBO bound — happens with post-FX in GL33.  Other state (blend,
+        // scissor, vao, depth) is saved/restored inside RenderDrawData.
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
+    // Vulkan: the engine records ImGui_ImplVulkan_RenderDrawData into its
+    // command buffer right after Render() returns (EngineVulkan_DebugOverlay).
 
     // Drain deferred actions queued by UI click handlers.  See the
     // s_pendingActions comment for the why — running cheats here

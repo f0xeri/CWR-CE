@@ -22,6 +22,8 @@ namespace Poseidon::Dev {
 namespace DebugOverlay
 {
     void Init(SDL_Window* window, void* glContext);
+    void InitForVulkan(SDL_Window* window);
+    bool IsInitialized();
     void ProcessEvent(const SDL_Event& event);
 
     // Fire an in-process content re-mount through the exact deferred path the MODS-tab

@@ -38,7 +38,11 @@ bool EngineVulkan::InitPipelineResources()
         }
 
         // Samplers: filter(linear/point) x clampU x clampV — mirror of GL33's
-        // 8 sampler objects. Index = point*4 + clampU*2 + clampV.
+        // 8 sampler objects. Index = point*4 + clampU*2 + clampV. Linear
+        // samplers get 16x anisotropy like GL33's CreateSamplerStates —
+        // without it terrain at grazing angles turns to mush.
+        const bool anisoSupported = _vk.physicalDevice.getFeatures().samplerAnisotropy;
+        const float maxAniso = std::min(16.0f, _vk.deviceProps.limits.maxSamplerAnisotropy);
         for (int i = 0; i < kSamplerCombos; ++i)
         {
             const bool point = (i & 4) != 0;
@@ -51,6 +55,11 @@ bool EngineVulkan::InitPipelineResources()
                                        point ? vk::SamplerMipmapMode::eNearest : vk::SamplerMipmapMode::eLinear, addrU,
                                        addrV, vk::SamplerAddressMode::eRepeat);
             info.maxLod = VK_LOD_CLAMP_NONE;
+            if (!point && anisoSupported && maxAniso > 1.0f)
+            {
+                info.anisotropyEnable = true;
+                info.maxAnisotropy = maxAniso;
+            }
             _samplers[i] = _vk.device.createSampler(info);
         }
 
@@ -116,16 +125,19 @@ bool EngineVulkan::InitPipelineResources()
         }
 
         // Descriptor set layout: 2 dynamic UBOs + tex0 + tex1 (detail slot;
-        // white fallback when the draw is single-textured).
+        // white fallback when the draw is single-textured) + the instanced-run
+        // world-matrix array (dynamic offset selects the run's 16KB slice).
         const vk::DescriptorSetLayoutBinding bindings[] = {
             {0, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
             {1, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eFragment},
             {2, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment},
             {3, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment},
+            {4, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
         };
-        _setLayout = _vk.device.createDescriptorSetLayout({{}, 4, bindings});
-        // Per-draw world matrix rides as a push constant (VSTransform/VSShadow).
-        const vk::PushConstantRange worldRange(vk::ShaderStageFlagBits::eVertex, 0, 64);
+        _setLayout = _vk.device.createDescriptorSetLayout({{}, 5, bindings});
+        // Per-draw world matrix + instanced flag ride as push constants
+        // (VSTransform/VSShadow): mat4 at 0, vec4 flags at 64.
+        const vk::PushConstantRange worldRange(vk::ShaderStageFlagBits::eVertex, 0, 80);
         _pipelineLayout = _vk.device.createPipelineLayout({{}, 1, &_setLayout, 1, &worldRange});
 
         // Per-frame descriptor pools: every flush/TL draw allocates a fresh
@@ -133,7 +145,7 @@ bool EngineVulkan::InitPipelineResources()
         // GPU is done (doc 4.5). Sized for soup flushes + per-draw TL sets.
         constexpr uint32_t kMaxSetsPerFrame = 16384;
         const vk::DescriptorPoolSize poolSizes[] = {
-            {vk::DescriptorType::eUniformBufferDynamic, 2 * kMaxSetsPerFrame},
+            {vk::DescriptorType::eUniformBufferDynamic, 3 * kMaxSetsPerFrame},
             {vk::DescriptorType::eCombinedImageSampler, 2 * kMaxSetsPerFrame},
         };
         for (int f = 0; f < kFramesInFlight; ++f)
@@ -354,6 +366,17 @@ vk::Pipeline EngineVulkan::GetOrCreatePipeline(const PipelineKey& key)
 
     vk::PipelineDepthStencilStateCreateInfo depthStencil;
     depthStencil.depthCompareOp = vk::CompareOp::eLessOrEqual;
+    // Per-poly shadow exclusion, mirroring GL33's GLDepthStencilState:
+    // non-shadow draws stamp stencil 0 (ALWAYS + REPLACE ref=0), shadow
+    // polys draw with EQUAL 0 + INCR_SAT so a pixel covered by several
+    // overlapping shadow polys (knees, elbows) darkens exactly once.
+    depthStencil.stencilTestEnable = true;
+    vk::StencilOpState stencilOp;
+    stencilOp.failOp = vk::StencilOp::eKeep;
+    stencilOp.depthFailOp = vk::StencilOp::eKeep;
+    stencilOp.compareMask = 0xFF;
+    stencilOp.writeMask = 0xFF;
+    stencilOp.reference = 0;
     switch (static_cast<DepthMode>(key.depth))
     {
         case DepthMode::Normal:
@@ -367,12 +390,22 @@ vk::Pipeline EngineVulkan::GetOrCreatePipeline(const PipelineKey& key)
         case DepthMode::Disabled:
             break;
         case DepthMode::Shadow:
-            // TODO(vk-phase3): stencil shadow accumulation. Read-only depth
-            // keeps the geometry visible without stencil for now.
             depthStencil.depthTestEnable = true;
             depthStencil.depthWriteEnable = false;
             break;
     }
+    if (static_cast<DepthMode>(key.depth) == DepthMode::Shadow)
+    {
+        stencilOp.compareOp = vk::CompareOp::eEqual;
+        stencilOp.passOp = vk::StencilOp::eIncrementAndClamp;
+    }
+    else
+    {
+        stencilOp.compareOp = vk::CompareOp::eAlways;
+        stencilOp.passOp = vk::StencilOp::eReplace;
+    }
+    depthStencil.front = stencilOp;
+    depthStencil.back = stencilOp;
 
     vk::PipelineColorBlendAttachmentState blendAttachment;
     blendAttachment.colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
@@ -439,9 +472,10 @@ vk::Pipeline EngineVulkan::GetOrCreatePipeline(const PipelineKey& key)
 
 // ── Per-flush state application (GL33's ApplyPassState analogue) ───────────
 
-void EngineVulkan::ApplyPassState(Texture* tex, int /*level*/, const render::LegacySpec& spec, PassId passId,
+void EngineVulkan::ApplyPassState(Texture* tex, int level, const render::LegacySpec& spec, PassId passId,
                                   PipelineVertexInput vertexInput)
 {
+    (void)level;
     const bool meshInput = vertexInput == PipelineVertexInput::Mesh ||
                            (vertexInput == PipelineVertexInput::ActivePass && IsIn3DPass());
 
@@ -557,7 +591,7 @@ bool EngineVulkan::WriteConstantsAndBindDescriptors(vk::CommandBuffer cmd)
         _cachedSampler == _currentSamplerIdx)
     {
         cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, _pipelineLayout, 0, _cachedSet,
-                               {_cachedDynOffsets[0], _cachedDynOffsets[1]});
+                               {_cachedDynOffsets[0], _cachedDynOffsets[1], _instOffset});
         return true;
     }
 
@@ -596,6 +630,7 @@ bool EngineVulkan::WriteConstantsAndBindDescriptors(vk::CommandBuffer cmd)
 
     const vk::DescriptorBufferInfo vsInfo(ring.buffer, 0, kVSConstFloats * sizeof(float));
     const vk::DescriptorBufferInfo psInfo(ring.buffer, 0, kPSConstFloats * sizeof(float));
+    const vk::DescriptorBufferInfo instInfo(ring.buffer, 0, kWorldInstancesBytes);
     const vk::DescriptorImageInfo texInfo(_samplers[_currentSamplerIdx], tex0,
                                           vk::ImageLayout::eShaderReadOnlyOptimal);
     // TEXTURE1 keeps the default linear-wrap sampler like GL33 (only slot 0
@@ -606,10 +641,11 @@ bool EngineVulkan::WriteConstantsAndBindDescriptors(vk::CommandBuffer cmd)
         {set, 1, 0, 1, vk::DescriptorType::eUniformBufferDynamic, nullptr, &psInfo},
         {set, 2, 0, 1, vk::DescriptorType::eCombinedImageSampler, &texInfo},
         {set, 3, 0, 1, vk::DescriptorType::eCombinedImageSampler, &tex1Info},
+        {set, 4, 0, 1, vk::DescriptorType::eUniformBufferDynamic, nullptr, &instInfo},
     };
-    _vk.device.updateDescriptorSets(4, writes, 0, nullptr);
+    _vk.device.updateDescriptorSets(5, writes, 0, nullptr);
 
-    const uint32_t dynamicOffsets[2] = {(uint32_t)vsOffset, (uint32_t)psOffset};
+    const uint32_t dynamicOffsets[3] = {(uint32_t)vsOffset, (uint32_t)psOffset, _instOffset};
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, _pipelineLayout, 0, set, dynamicOffsets);
 
     _cachedSet = set;

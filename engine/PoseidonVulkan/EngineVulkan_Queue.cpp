@@ -71,6 +71,9 @@ void QueueVulkan::Free(int i)
 
 WORD* EngineVulkan::QueueAdd(QueueVulkan& queue, int n)
 {
+    if (_instCount > 1)
+        _instImpure = true; // soup-queue geometry can't be instanced — run must fall back
+
     PoseidonAssert(queue._actTri >= 0);
     PoseidonAssert(queue._triUsed[queue._actTri]);
     TriQueueVulkan& triq = queue._tri[queue._actTri];

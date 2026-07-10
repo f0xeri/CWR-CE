@@ -373,6 +373,49 @@ void EngineVulkan::UploadVSTexGenConstants(render::TexGenMode mode)
     }
 }
 
+// ── Instanced runs ──────────────────────────────────────────────────────────
+
+bool EngineVulkan::InstancedRunAdd(const Matrix4& modelToWorld)
+{
+    if (_instPending >= kMaxInstances)
+        return false;
+    GfxMatrix& m = _instArray[_instPending];
+    ConvertMatrix(m, modelToWorld);
+    m._41 -= _frameState.cameraPos[0];
+    m._42 -= _frameState.cameraPos[1];
+    m._43 -= _frameState.cameraPos[2];
+    ++_instPending;
+    return true;
+}
+
+void EngineVulkan::BeginInstancedRunUpload()
+{
+    _instImpure = false;
+    if (_instPending <= 0 || !_frameOpen)
+    {
+        _instCount = 0;
+        return;
+    }
+
+    // The run's matrices live in a UBO-ring slice selected by binding 4's
+    // dynamic offset. Always reserve the full shader-declared block (16KB)
+    // so offset+range stays inside the ring for the bind-time VUID.
+    VulkanBuffer& ring = _uboBuffer[_frameIndex];
+    vk::DeviceSize offset = 0;
+    void* dst = ring.Allocate(kWorldInstancesBytes, _uboAlign, offset);
+    if (!dst)
+    {
+        // Ring exhausted: draw the head scalar and let the scene redraw the
+        // rest (EndInstancedRun reports the run impure).
+        _instCount = 1;
+        _instImpure = true;
+        return;
+    }
+    memcpy(dst, _instArray, (size_t)_instPending * 64);
+    _instOffset = (uint32_t)offset;
+    _instCount = _instPending;
+}
+
 // ── TL entry points ─────────────────────────────────────────────────────────
 
 void EngineVulkan::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelToWorld,
@@ -448,6 +491,8 @@ void EngineVulkan::DoSetGrassParamsPS()
 
 void EngineVulkan::EnableNightEye(float night)
 {
+    if (_nightVision)
+        night = 0;
     if (fabs(_nightEye - night) < 0.01f)
         return;
     FlushQueues();

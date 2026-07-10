@@ -316,15 +316,20 @@ void EngineVulkan::DrawSectionTL(const Shape& sMesh, int beg, int end)
     vk::CommandBuffer cmd = _frames[_frameIndex].cmd;
 
     // Bind (or reuse) the material/pass descriptor set, then push the
-    // per-draw world matrix — the Vulkan analogue of GL33's 64-byte
-    // world-subrange UBO update.
+    // per-draw world matrix + instanced flag — the Vulkan analogue of GL33's
+    // 64-byte world-subrange UBO update.
     if (!WriteConstantsAndBindDescriptors(cmd))
         return;
-    cmd.pushConstants(_pipelineLayout, vk::ShaderStageFlagBits::eVertex, 0, 64, &_currentDrawItem.worldMatrix);
+    struct
+    {
+        GfxMatrix world;
+        float flags[4];
+    } push = {_currentDrawItem.worldMatrix, {_instCount > 1 ? 1.0f : 0.0f, 0, 0, 0}};
+    cmd.pushConstants(_pipelineLayout, vk::ShaderStageFlagBits::eVertex, 0, 80, &push);
 
     cmd.bindVertexBuffers(0, vb, buf->_dynamic ? buf->_dynOffset : vk::DeviceSize(0));
     cmd.bindIndexBuffer(buf->_ib, 0, vk::IndexType::eUint16);
-    cmd.drawIndexed(indexCount, 1, siBeg.beg, 0, 0);
+    cmd.drawIndexed(indexCount, _instCount > 1 ? _instCount : 1, siBeg.beg, 0, 0);
     ++gPerfDrawCalls;
 }
 

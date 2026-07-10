@@ -142,6 +142,20 @@ class EngineVulkan : public Engine
     void SetGrassParams(float a1, float a2, float a3 = 0, float a4 = 0) override;
     void EnableNightEye(float night) override;
 
+    // Instanced-run mode (GL33 perf effort 08 mirror): Scene batches a sorted
+    // run of identical static shapes; the matrices land in a 16KB UBO-ring
+    // slice bound at binding 4, TL draws issue drawIndexed with K instances,
+    // and a push-constant flag switches the shader to worldArr[gl_InstanceID].
+    void InstancedRunReset() override { _instPending = 0; }
+    bool InstancedRunAdd(const Matrix4& modelToWorld) override;
+    void BeginInstancedRunUpload() override;
+    bool EndInstancedRun() override
+    {
+        const bool pure = !_instImpure;
+        _instCount = 0;
+        return pure;
+    }
+
     void ResetForRemount() override;
 
     float ZShadowEpsilon() const override;
@@ -260,6 +274,12 @@ class EngineVulkan : public Engine
     bool CreateFrameResources();
     void DestroyFrameResources();
     void RecreateSwapchain();
+
+    // ── ImGui dev overlay (EngineVulkan_DebugOverlay.cpp) ──
+    bool _imguiReady = false;
+    void InitDebugOverlay();
+    void ShutdownDebugOverlay();
+    void RenderDebugOverlay(vk::CommandBuffer cmd); // inside the open rendering pass
 
     // ── Texture upload plumbing (EngineVulkan_Upload.cpp) ──
     VulkanBuffer _stagingBuffer[kFramesInFlight]; // per-frame staging arena
@@ -381,6 +401,14 @@ class EngineVulkan : public Engine
     void PrepareMeshTLImpl(const FrameState& frame, const Matrix4& modelToWorld, const render::LegacySpec& spec);
     void InvalidateMaterialCache();
     void DoSetGrassParamsPS();
+
+    static constexpr int kMaxInstances = 256;
+    static constexpr uint32_t kWorldInstancesBytes = kMaxInstances * 64; // shader-declared block size
+    int _instCount = 0;
+    bool _instImpure = false;
+    int _instPending = 0;
+    GfxMatrix _instArray[kMaxInstances];
+    uint32_t _instOffset = 0; // current run's dynamic offset into the UBO ring
 
     // ── Pipeline cache + descriptors (EngineVulkan_Pipeline.cpp) ──
     enum class PSSel : uint8_t

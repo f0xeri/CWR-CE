@@ -185,9 +185,18 @@ void EngineVulkan::InitDraw(bool clear, PackedColor color)
     _soupOverflowLogged = false;
     _pipelineBound = false;
     _activePassId = PassId::ScreenSpace;
+    if (_bank)
+        _bank->StartFrame(); // rotate the texture frame-LRU lists (mirrors GL33)
+    // Base per-frame state: recomputes _accomodateEye = HWhite * userBrightness
+    // (default 1.6) and the night-vision green filter. Skipping this left the
+    // whole scene exactly 0.625x (1/1.6) darker than GL33.
+    Engine::InitDraw(clear, color);
     InvalidateMaterialCache(); // per-frame lighting inputs may have changed
     _cachedSet = nullptr;      // the pool reset above freed it
     _constDirty = true;
+    _instCount = 0;
+    _instImpure = false;
+    _instOffset = 0; // last frame's slice retired with its ring
     UploadVSScreenConstants();
 
     _frameOpen = true;
@@ -217,10 +226,18 @@ void EngineVulkan::FinishDraw()
     if (!_frameOpen)
         return;
 
-    // Commit whatever the producer left queued (mirrors GL33's FinishDraw).
+    // Base frame bookkeeping (frame counter, durations) + debug texts,
+    // then commit whatever the producer left queued (mirrors GL33).
+    Engine::FinishDraw();
+    Engine::DrawFinishTexts();
     FlushAndFreeAllQueues(_queueNo);
 
     FrameResources& f = _frames[_frameIndex];
+
+    // Dev overlay composites on top of the finished game frame, inside the
+    // still-open rendering pass (mirrors GL33's BackToFront timing).
+    RenderDebugOverlay(f.cmd);
+
     f.cmd.endRendering();
 
     TransitionImage(f.cmd, _swapchain.images[_imageIndex], vk::ImageLayout::eColorAttachmentOptimal,
@@ -230,6 +247,9 @@ void EngineVulkan::FinishDraw()
 
     _frameOpen = false;
     _frameRecorded = true;
+
+    if (_bank)
+        _bank->FinishFrame(); // texture LRU bookkeeping (mirrors GL33)
 }
 
 void EngineVulkan::NextFrame()

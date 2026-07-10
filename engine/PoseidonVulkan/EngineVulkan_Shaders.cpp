@@ -168,9 +168,13 @@ void main() {
 // Per-draw world matrix as a push constant: GL33 updates a 64-byte UBO
 // subrange per draw; push constants are the Vulkan analogue and let draws
 // with unchanged materials reuse the previous descriptor set entirely.
+// flags.x > 0.5 = instanced run: the world matrix comes from the
+// WorldInstances UBO slice (binding 4) indexed by gl_InstanceID instead.
 // The `world` member of VSConstants stays as std140 padding.
 #define VK_WORLD_PUSH_CONSTANT \
-    "layout(push_constant) uniform PushWorld { mat4 world; } pc;\n"
+    "layout(push_constant) uniform PushWorld { mat4 world; vec4 flags; } pc;\n" \
+    "layout(set = 0, binding = 4, std140) uniform WorldInstances { mat4 worldArr[256]; };\n" \
+    "mat4 FetchWorld() { return (pc.flags.x > 0.5) ? worldArr[gl_InstanceIndex] : pc.world; }\n"
 
 // 3D mesh vertex shader — port of GL33's vsTransform (lighting, fog, texgen,
 // local point/spot lights). Camera-relative: world matrix translation already
@@ -187,8 +191,9 @@ layout(location = 3) out vec2 vUV1;
 layout(location = 4) out float vFogTC;
 
 void main() {
-    vec4 worldPos    = pc.world * vec4(pos, 1.0);
-    vec3 worldNormal = normalize(mat3(pc.world) * normal);
+    mat4 worldM      = FetchWorld();
+    vec4 worldPos    = worldM * vec4(pos, 1.0);
+    vec3 worldNormal = normalize(mat3(worldM) * normal);
     vec4 viewPos     = view * worldPos;
     gl_Position      = proj * viewPos;
 
@@ -272,7 +277,7 @@ layout(location = 3) out vec2 vUV1;
 layout(location = 4) out float vFogTC;
 
 void main() {
-    vec4 worldPos = pc.world * vec4(pos, 1.0);
+    vec4 worldPos = FetchWorld() * vec4(pos, 1.0);
     gl_Position   = proj * view * worldPos;
     vColor        = diffuse;   // unlit — direct from material.diffuse
     vSpecColor    = vec4(0.0);

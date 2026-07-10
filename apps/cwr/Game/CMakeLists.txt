@@ -33,6 +33,14 @@ if(MSVC OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEN
     
     # Disable SafeSEH for compatibility with external .obj files.
     target_link_options(PoseidonGame PRIVATE /SAFESEH:NO)
+
+    # The imgui Vulkan backend (vcpkg, compiled with prototypes) gives the
+    # exe a vulkan-1.dll import.  Delay-load it so machines without a Vulkan
+    # runtime can still start the game in GL mode — the dll is only pulled
+    # in on the first ImGui_ImplVulkan_* call, which happens under
+    # `--render vk` only (and after our own backend loads the loader dynamically).
+    target_link_options(PoseidonGame PRIVATE /DELAYLOAD:vulkan-1.dll)
+    target_link_libraries(PoseidonGame PRIVATE delayimp.lib)
 endif()
 
 # Include paths: only need root and Poseidon (all libs/externals handled by Poseidon.lib)
