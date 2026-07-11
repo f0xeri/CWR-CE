@@ -573,6 +573,11 @@ Engine* CreateEngineVulkan(int w, int h, bool windowed, int bpp)
         delete engine;
         return nullptr; // GameApplication falls back to Auto (gl33)
     }
+    // Construct first so SDL video / window are initialised, then hide the OS
+    // cursor unconditionally — the game draws its own cursor sprite (mirrors
+    // CreateEngineGL33; SDL_HideCursor before the window exists is a no-op on
+    // some SDL3 backends, so the order matters).
+    SDL_HideCursor();
     return engine;
 }
 

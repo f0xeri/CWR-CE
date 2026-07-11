@@ -1702,6 +1702,13 @@ void CreateSharedContext(SDL_Window* window)
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // The game owns the OS cursor (hidden at startup, it draws its own
+    // sprite). Without this flag the SDL3 backend's UpdateMouseCursor calls
+    // SDL_ShowCursor() every frame while the panel is HIDDEN (MouseDrawCursor
+    // false), resurrecting the Windows cursor over the game after the first
+    // overlay use. While the panel is open we draw ImGui's software cursor
+    // (io.MouseDrawCursor in NewFrame), so the backend never needs the OS one.
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     io.IniFilename = nullptr; // no imgui.ini side-effects
     ImGui::StyleColorsDark();
 }

@@ -110,6 +110,10 @@ class EngineVulkan : public Engine
     void HandleEvents() override;
     bool IsOpen() const override;
     void SetMouseGrab(bool grab) override;
+    // Without this override the base returns false, so the dev panel's
+    // save/restore (ApplyDevPanelMouseState) would "restore" grab to false on
+    // close and the cursor could leave the window in windowed mode.
+    bool IsMouseGrabbed() const override { return _eventWindow.IsMouseGrabbed(); }
 
     void ListResolutions(FindArray<ResolutionInfo>& ret) override;
     void ListRefreshRates(FindArray<int>& ret) override;
