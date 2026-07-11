@@ -449,8 +449,9 @@ class EngineVulkan : public Engine
     {
         size_t operator()(const PipelineKey& k) const
         {
-            return (size_t)k.ps | ((size_t)k.mesh << 4) | ((size_t)k.blend << 8) | ((size_t)k.depth << 16) |
-                   ((size_t)k.cull << 24) | ((size_t)k.frontFace << 32);
+            const uint64_t h = (uint64_t)k.ps | ((uint64_t)k.mesh << 4) | ((uint64_t)k.blend << 8) |
+                               ((uint64_t)k.depth << 16) | ((uint64_t)k.cull << 24) | ((uint64_t)k.frontFace << 32);
+            return (size_t)(h ^ (h >> 32));
         }
     };
 
