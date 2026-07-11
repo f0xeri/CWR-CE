@@ -292,6 +292,12 @@ void EngineVulkan::BeginScreenPass()
     // Reset the IsColored tint so a leftover mesh value can't dim the HUD.
     static const float white[4] = {1, 1, 1, 1};
     UploadPSConstant(3 /*SlotConstColor*/, white);
+    // Disable the cascade shadow test for screen-space draws: vWorldRel is 0
+    // there, which would otherwise project the CAMERA point into omni tier 0
+    // and darken the HUD/menus whenever the camera itself sits in shadow.
+    // UpdateShadowMapLitState re-enables it at the next 3D-pass begin.
+    static const float shadowOff[4] = {0, 0, 1, 0};
+    UploadPSConstant(2 /*SlotShadowCtl*/, shadowOff);
     UploadVSScreenConstants();
 }
 

@@ -174,6 +174,10 @@ void EngineVulkan::BeginPass(PassId passId)
         _frameState = BuildFrameState(GScene->GetCamera(), GScene->MainLight(), _bias, _fogColor, _sunEnabled);
         _currentDrawItem = DrawItem{};
         UploadFrameConstants(_frameState);
+        // Feed the (previous frame's) cascade shadow constants to the lit
+        // shaders — no-op until a depth pass has run with shadow maps enabled
+        // (mirrors GL33's Begin3DPass timing).
+        UpdateShadowMapLitState();
         InvalidateMaterialCache();
     }
 }

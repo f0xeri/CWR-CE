@@ -158,6 +158,19 @@ class EngineVulkan : public Engine
 
     void ResetForRemount() override;
 
+    // ── Shadow maps / CSM (EngineVulkan_ShadowDepth.cpp) ──
+    // Same producer contract as GL33: Scene collects the casters + tiered
+    // cascades and calls RenderShadowDepthScene mid-frame; the lit shaders
+    // sample the cascade depth array via PSConstants c2/c8-c26 + binding 5.
+    void SetShadowMapsEnabled(bool enabled) override { _shadowTuning.enabled = enabled; }
+    bool ShadowMapsEnabled() const override { return _shadowTuning.enabled; }
+    ShadowMapTuning GetShadowMapTuning() const override { return _shadowTuning; }
+    void SetShadowMapTuning(const ShadowMapTuning& tuning) override { _shadowTuning = tuning; }
+    void SetShadowMapSunFactor(float f) override { _shadowSunFactor = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f); }
+    static constexpr int kShadowCascades = 4;
+    void RenderShadowDepthScene(const float* lightVPs, const float* splitViewDist, const float* camFwd3,
+                                int numCascades, int omniCount, int res, const ShadowCasterSet& casters) override;
+
     float ZShadowEpsilon() const override;
     float ZRoadEpsilon() const override;
     float ObjMipmapCoef() const override;
@@ -491,6 +504,45 @@ class EngineVulkan : public Engine
     vk::Image _depthImage;
     VmaAllocation _depthAlloc = nullptr;
     vk::ImageView _depthView;
+
+    // ── Shadow-map state (EngineVulkan_ShadowDepth.cpp) — GL33 field mirror ──
+    ShadowMapTuning _shadowTuning;                 // runtime knobs (FP parameter set)
+    float _shadowSunFactor = 1.0f;                 // day/night fade [0,1]; 0 at night (no sun shadow)
+    bool _shadowMapActive = false;                 // a depth pass has run (array content + layout valid)
+    int _shadowMapRes = 0;                         // cascade array resolution
+    int _shadowCascades = 0;                       // active cascade count this frame
+    int _shadowOmniCount = 0;                      // leading omni (camera-sphere) tiers — distance-selected
+    float _shadowMapVP[kShadowCascades * 16] = {}; // per-cascade light view-projections (column-major)
+    float _shadowSplits[kShadowCascades] = {};     // per-tier select distance (omni: 3D radius; frustum: eye far)
+    float _shadowCamFwd[3] = {};                   // camera forward (for eye-depth cascade select)
+
+    // GPU objects: the cascade depth array (allocated on first depth pass,
+    // recreated on resolution change), per-layer attachment views + one
+    // sampled array view, and a 1x1 cleared fallback array so binding 5 is
+    // always valid before the first depth pass.
+    vk::Format _shadowFormat = vk::Format::eUndefined;
+    vk::Image _shadowImage;
+    VmaAllocation _shadowAlloc = nullptr;
+    vk::ImageView _shadowLayerViews[kShadowCascades];
+    vk::ImageView _shadowArrayView;
+    vk::Image _shadowFallbackImage;
+    VmaAllocation _shadowFallbackAlloc = nullptr;
+    vk::ImageView _shadowFallbackView;
+    vk::Sampler _shadowSampler; // nearest + clamp (GL33 depth-array params)
+    // Depth-only caster pipelines: solid (pos, cull front) and alpha-cutout
+    // (pos+uv, texture alpha discard); light-VP rides as a push constant.
+    vk::DescriptorSetLayout _shadowSetLayout; // single binding: caster texture
+    vk::PipelineLayout _shadowPipelineLayout;
+    vk::ShaderModule _shadowSolidVSModule, _shadowSolidPSModule;
+    vk::ShaderModule _shadowAlphaVSModule, _shadowAlphaPSModule;
+    vk::Pipeline _shadowSolidPipeline, _shadowAlphaPipeline;
+    bool _shadowInitFailed = false; // lazy-init failed once — don't retry every frame
+
+    void UpdateShadowMapLitState();      // PS UBO c2/c8-c26 writer (EngineVulkan_Shaders.cpp)
+    bool CreateShadowFallbackTexture();  // called from InitPipelineResources
+    bool EnsureShadowPassResources();    // lazy: shaders, layouts, pipelines
+    bool EnsureShadowMapTarget(int res); // lazy: the cascade depth array
+    void DestroyShadowResources();       // called from DestroyPipelineResources
 
     bool InitPipelineResources(); // rings, samplers, white tex, layouts, descriptor sets
     void DestroyPipelineResources();

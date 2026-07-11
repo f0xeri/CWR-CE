@@ -3,8 +3,8 @@
 // to GL33's VSConst / PSConstants slot maps so producer-visible semantics stay
 // 1:1; only the resource addressing (set/binding, in/out locations) is Vulkan.
 //
-// Phase-1 scope: VSScreen + PSNormal (day, no cascade shadow sampling — the
-// shadowCtl path is never enabled for screen-space draws) + PSFlat.
+// Includes the cascade shadow-map sampling (VK_PS_CASCADE_SHADOW, fed by
+// UpdateShadowMapLitState + the depth pass in EngineVulkan_ShadowDepth.cpp).
 #include "EngineVulkan.hpp"
 #include "Utils/VulkanShaderCompiler.hpp"
 
@@ -23,8 +23,13 @@ enum : int
 
     PSFogColor = 0,
     PSAlphaRef = 1,
+    PSShadowCtl = 2,
     PSConstColor = 3,
     PSRgbEyeCoef = 7,
+    PSCascadeVP = 8,
+    PSCascadeSplits = 24,
+    PSCascadeCtl = 25,
+    PSCamFwd = 26,
 };
 } // namespace slots
 
@@ -59,8 +64,10 @@ layout(location = 1) out vec4 vSpecColor;
 layout(location = 2) out vec2 vUV0;
 layout(location = 3) out vec2 vUV1;
 layout(location = 4) out float vFogTC;
+layout(location = 5) out vec3 vWorldRel;
 
 void main() {
+    vWorldRel = vec3(0.0); // screen draws are never shadow-mapped
     // Identical math to GL33 (GL-style NDC, Y up); the record path uses a
     // negative-height viewport so rasterization lands like GL (doc 4.6).
     float w = 1.0 / aRhw;
@@ -76,18 +83,95 @@ void main() {
 }
 )";
 
-const char* const kPSNormal = R"(#version 450
-layout(set = 0, binding = 1, std140) uniform PSConstants {
-    vec4 fogColor;    // c0
-    vec4 alphaRef;    // c1: {ref, enabled, alphaToCoverage, flatDebug}
-    vec4 shadowCtl;   // c2 (unused in phase 1 — screen draws never enable it)
-    vec4 constColor;  // c3: per-object IsColored tint (white = no-op)
-    vec4 _pad4;
-    vec4 _pad5;
-    vec4 _pad6;
-    vec4 rgbEyeCoef;  // c7
-};
+// Shared PS UBO declaration — GL33 PSConstants layout (27 vec4 slots),
+// including the cascade shadow-map tail (c8..c26) fed by
+// UpdateShadowMapLitState.
+#define VK_PS_CONSTANTS_BLOCK \
+    "layout(set = 0, binding = 1, std140) uniform PSConstants {\n" \
+    "    vec4 fogColor;    // c0\n" \
+    "    vec4 alphaRef;    // c1: {ref, enabled, alphaToCoverage, flatDebug}\n" \
+    "    vec4 shadowCtl;   // c2: {enable, bias, darkness, texelSize}\n" \
+    "    vec4 constColor;  // c3: per-object IsColored tint\n" \
+    "    vec4 lightDir;    // c4 (water)\n" \
+    "    vec4 grassCoef1;  // c5\n" \
+    "    vec4 grassCoef2;  // c6\n" \
+    "    vec4 rgbEyeCoef;  // c7\n" \
+    "    mat4 cascadeVP[4]; // c8-c23: per-cascade light view-projection\n" \
+    "    vec4 cascadeSplits;// c24: per-tier select distance (omni: radius; frustum: far eye-depth)\n" \
+    "    vec4 cascadeCtl;   // c25: {count, fadeRange, biasBase, omniCount}\n" \
+    "    vec4 camFwd;       // c26: camera forward (eye-depth = dot(vWorldRel, camFwd))\n" \
+    "};\n"
 
+// Cascade shadow-map sampling — line-for-line port of the GL33 lit-shader
+// branch (EngineGL33_Shaders.cpp psNormal/psDetail/psGrass). The depth array
+// is written and sampled with the same VK clip->uv convention (no Y flip on
+// either side), so the mapping matches GL33's bottom-up pair by construction.
+#define VK_PS_CASCADE_SHADOW R"(
+layout(set = 0, binding = 5) uniform sampler2DArray shadowMap;
+layout(location = 5) in vec3 vWorldRel;
+
+vec3 ApplyCascadeShadow(vec3 rgb, float fogTC) {
+    if (shadowCtl.x <= 0.5)
+        return rgb;
+    // Tiered shadow maps: the first omniCount tiers are camera-centred spheres
+    // (selected by 3D distance, so a caster in ANY direction around the player —
+    // including behind the camera — casts into view); the rest are frustum
+    // slices reaching the far view distance (selected by eye-depth). Pick the
+    // tightest matching tier, then advance to the first tier whose projection is
+    // in bounds (coverage fallthrough, so a too-tight near tier never drops the
+    // shadow). 3x3-PCF the layer, cross-fade to the next tier over a band, fade
+    // at the far edge, and dim by the fog factor so distant shadows aren't harsh.
+    int nC = int(cascadeCtl.x);
+    int omniN = int(cascadeCtl.w);
+    float eyeDepth = dot(vWorldRel, camFwd.xyz);
+    float dist3D = length(vWorldRel);
+    int ci = nC;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= nC) break;
+        float metric = (i < omniN) ? dist3D : eyeDepth;
+        if (metric <= cascadeSplits[i]) { ci = i; break; }
+    }
+    if (ci < nC) {
+        float ts = shadowCtl.w;
+        float prevEdge = (ci > 0) ? cascadeSplits[ci - 1] : 0.0;
+        float ciMetric = (ci < omniN) ? dist3D : eyeDepth;
+        float band = (cascadeSplits[ci] - prevEdge) * 0.15;
+        float bw = (ci + 1 < nC) ? clamp((ciMetric - (cascadeSplits[ci] - band)) / max(band, 0.001), 0.0, 1.0) : 0.0;
+        float litSum = 0.0;
+        float wSum = 0.0;
+        for (int p = 0; p < 4; ++p) {
+            int c = ci + p;
+            if (c >= nC) break;
+            // p0 = primary, p1 = blend partner; while nothing has covered yet a
+            // later p force-samples the next looser tier (coverage fallthrough).
+            float w = (p == 0) ? (1.0 - bw) : ((wSum <= 0.0) ? 1.0 : ((p == 1) ? bw : 0.0));
+            if (w <= 0.0) continue;
+            vec4 cp = cascadeVP[c] * vec4(vWorldRel, 1.0);
+            vec3 sc = cp.xyz / cp.w;
+            vec2 suv = sc.xy * 0.5 + 0.5;
+            if (suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0 && sc.z > 0.0 && sc.z < 1.0) {
+                float bias = cascadeCtl.z * float(c + 1) * float(c + 1);
+                float lit = 0.0;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                        lit += (sc.z - bias > texture(shadowMap, vec3(suv + vec2(float(dx), float(dy)) * ts, float(c))).r) ? 0.0 : 1.0;
+                litSum += w * (lit / 9.0);
+                wSum += w;
+            }
+        }
+        if (wSum > 0.0) {
+            float lit = litSum / wSum;
+            float lastSplit = cascadeSplits[nC - 1];
+            float fade = clamp((lastSplit - eyeDepth) / max(cascadeCtl.y, 0.001), 0.0, 1.0);
+            float strength = (1.0 - lit) * fade * clamp(fogTC, 0.0, 1.0); // dimmer in fog / far
+            rgb *= mix(1.0, shadowCtl.z, strength);
+        }
+    }
+    return rgb;
+}
+)"
+
+const char* const kPSNormal = "#version 450\n" VK_PS_CONSTANTS_BLOCK VK_PS_CASCADE_SHADOW R"(
 layout(set = 0, binding = 2) uniform sampler2D tex0;
 
 layout(location = 0) in vec4 vColor;
@@ -102,6 +186,8 @@ void main() {
     vec4 r0 = vColor * texture(tex0, vUV0);
     r0 *= constColor;
     r0.rgb += vSpecColor.rgb;
+
+    r0.rgb = ApplyCascadeShadow(r0.rgb, vFogTC);
 
     if (alphaRef.z > 0.5) {
         float cov = clamp((r0.a - alphaRef.x) / max(fwidth(r0.a), 1e-4) + 0.5, 0.0, 1.0);
@@ -189,6 +275,7 @@ layout(location = 1) out vec4 vSpecColor;
 layout(location = 2) out vec2 vUV0;
 layout(location = 3) out vec2 vUV1;
 layout(location = 4) out float vFogTC;
+layout(location = 5) out vec3 vWorldRel;
 
 void main() {
     mat4 worldM      = FetchWorld();
@@ -196,6 +283,7 @@ void main() {
     vec3 worldNormal = normalize(mat3(worldM) * normal);
     vec4 viewPos     = view * worldPos;
     gl_Position      = proj * viewPos;
+    vWorldRel        = worldPos.xyz; // camera-relative world pos for cascade shadow lookup
 
     float NdotL = max(0.0, dot(worldNormal, -sunDir.xyz));
     vec4 litColor;
@@ -275,6 +363,7 @@ layout(location = 1) out vec4 vSpecColor;
 layout(location = 2) out vec2 vUV0;
 layout(location = 3) out vec2 vUV1;
 layout(location = 4) out float vFogTC;
+layout(location = 5) out vec3 vWorldRel;
 
 void main() {
     vec4 worldPos = FetchWorld() * vec4(pos, 1.0);
@@ -284,26 +373,12 @@ void main() {
     vUV0          = (texCtrl.x > 0.5) ? (texMat0 * vec4(uv, 0, 1)).xy : uv;
     vUV1          = vUV0;
     vFogTC        = 1.0;       // shadows ignore fog
+    vWorldRel     = vec3(0.0); // shadow casters aren't shadow-mapped receivers
 }
 )";
 
-// Shared PS UBO declaration — GL33 PSConstants layout (27 vec4 slots). The
-// cascade shadow-map tail (c8..c26) is declared for layout parity but never
-// read: shadowCtl stays 0 until shadow maps land (phase 3).
-#define VK_PS_CONSTANTS_BLOCK \
-    "layout(set = 0, binding = 1, std140) uniform PSConstants {\n" \
-    "    vec4 fogColor;    // c0\n" \
-    "    vec4 alphaRef;    // c1: {ref, enabled, alphaToCoverage, flatDebug}\n" \
-    "    vec4 shadowCtl;   // c2\n" \
-    "    vec4 constColor;  // c3: per-object IsColored tint\n" \
-    "    vec4 lightDir;    // c4 (water)\n" \
-    "    vec4 grassCoef1;  // c5\n" \
-    "    vec4 grassCoef2;  // c6\n" \
-    "    vec4 rgbEyeCoef;  // c7\n" \
-    "};\n"
-
 // PSDetail — diffuse * tex0, detail modulation from tex1 alpha.
-const char* const kPSDetail = "#version 450\n" VK_PS_CONSTANTS_BLOCK R"(
+const char* const kPSDetail = "#version 450\n" VK_PS_CONSTANTS_BLOCK VK_PS_CASCADE_SHADOW R"(
 layout(set = 0, binding = 2) uniform sampler2D tex0;
 layout(set = 0, binding = 3) uniform sampler2D tex1;
 
@@ -323,6 +398,8 @@ void main() {
     r0.rgb *= t1.a * 2.0;
     r0 += vSpecColor;
 
+    r0.rgb = ApplyCascadeShadow(r0.rgb, vFogTC);
+
     if (alphaRef.z > 0.5) {
         float cov = clamp((r0.a - alphaRef.x) / max(fwidth(r0.a), 1e-4) + 0.5, 0.0, 1.0);
         if (cov <= 0.0) discard;
@@ -339,7 +416,7 @@ void main() {
 )";
 
 // PSGrass — grass blending with alpha from coefficients.
-const char* const kPSGrass = "#version 450\n" VK_PS_CONSTANTS_BLOCK R"(
+const char* const kPSGrass = "#version 450\n" VK_PS_CONSTANTS_BLOCK VK_PS_CASCADE_SHADOW R"(
 layout(set = 0, binding = 2) uniform sampler2D tex0;
 layout(set = 0, binding = 3) uniform sampler2D tex1;
 
@@ -361,6 +438,7 @@ void main() {
     r0.rgb = vColor.rgb * t0.rgb;
     r0.a = clamp((grassCoef1.a * 2.0 - 1.0) + t1.a, 0.0, 1.0);
     r0.rgb = clamp(r0.rgb * t1.rgb * 2.0, 0.0, 1.0);
+    r0.rgb = ApplyCascadeShadow(r0.rgb, vFogTC);
     r0.a = clamp(grassCoef2.a * r0.a * 2.0, 0.0, 1.0);
 
     if (alphaRef.z > 0.5) {
@@ -492,6 +570,44 @@ void EngineVulkan::SetShaderFogEnabled(bool enabled)
         return;
     _vsConst[slots::VSFogParam * 4 + 2] = v;
     _constDirty = true;
+}
+
+void EngineVulkan::UpdateShadowMapLitState()
+{
+    // PS UBO: shadowCtl c2 {enable, 0, darkness, texelSize}; cascadeVP[4]
+    // c8-c23; cascadeSplits c24 (per-tier select distance: a camera 3D radius
+    // for the first omniCount omni tiers, a far eye-depth for frustum tiers);
+    // cascadeCtl c25 {count, fadeRange, biasBase, omniCount}; camFwd c26.
+    // Disabled default keeps count 0 / darkness 1.0 (no change), so the gate
+    // is doubly safe. Line-for-line mirror of GL33's UpdateShadowMapLitState;
+    // the texture itself rides at binding 5 of every descriptor set.
+    float ctl[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+    float splits[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float cascadeCtl[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float camFwd[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+    if (_shadowTuning.enabled && _shadowMapActive && _shadowImage && _shadowCascades > 0)
+    {
+        ctl[0] = 1.0f; // enable the per-fragment shadow test
+        // Lit-colour multiplier where shadowed, faded toward 1.0 (no shadow) as
+        // the sun sets: full darkness in daylight, none at night (mirrors GL33).
+        ctl[2] = 1.0f - _shadowSunFactor * (1.0f - _shadowTuning.darkness);
+        ctl[3] = (_shadowMapRes > 0) ? (1.0f / static_cast<float>(_shadowMapRes)) : 0.0f; // PCF texel size
+        cascadeCtl[0] = static_cast<float>(_shadowCascades);
+        cascadeCtl[1] = _shadowTuning.fadeRange;
+        cascadeCtl[2] = _shadowTuning.biasBase;
+        cascadeCtl[3] = static_cast<float>(_shadowOmniCount); // leading omni (distance-selected) tiers
+        for (int i = 0; i < _shadowCascades && i < 4; i++)
+            splits[i] = _shadowSplits[i];
+        camFwd[0] = _shadowCamFwd[0];
+        camFwd[1] = _shadowCamFwd[1];
+        camFwd[2] = _shadowCamFwd[2];
+        memcpy(_psConst + slots::PSCascadeVP * 4, _shadowMapVP, sizeof(float) * 16 * _shadowCascades);
+        _constDirty = true;
+    }
+    UploadPSConstant(slots::PSShadowCtl, ctl);
+    UploadPSConstant(slots::PSCascadeSplits, splits);
+    UploadPSConstant(slots::PSCascadeCtl, cascadeCtl);
+    UploadPSConstant(slots::PSCamFwd, camFwd);
 }
 
 void EngineVulkan::SetAlphaTest(bool enable, unsigned ref)

@@ -126,15 +126,17 @@ bool EngineVulkan::InitPipelineResources()
 
         // Descriptor set layout: 2 dynamic UBOs + tex0 + tex1 (detail slot;
         // white fallback when the draw is single-textured) + the instanced-run
-        // world-matrix array (dynamic offset selects the run's 16KB slice).
+        // world-matrix array (dynamic offset selects the run's 16KB slice) +
+        // the cascade shadow depth array (1x1 fallback until a depth pass runs).
         const vk::DescriptorSetLayoutBinding bindings[] = {
             {0, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
             {1, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eFragment},
             {2, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment},
             {3, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment},
             {4, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
+            {5, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment},
         };
-        _setLayout = _vk.device.createDescriptorSetLayout({{}, 5, bindings});
+        _setLayout = _vk.device.createDescriptorSetLayout({{}, 6, bindings});
         // Per-draw world matrix + instanced flag ride as push constants
         // (VSTransform/VSShadow): mat4 at 0, vec4 flags at 64.
         const vk::PushConstantRange worldRange(vk::ShaderStageFlagBits::eVertex, 0, 80);
@@ -146,7 +148,7 @@ bool EngineVulkan::InitPipelineResources()
         constexpr uint32_t kMaxSetsPerFrame = 16384;
         const vk::DescriptorPoolSize poolSizes[] = {
             {vk::DescriptorType::eUniformBufferDynamic, 3 * kMaxSetsPerFrame},
-            {vk::DescriptorType::eCombinedImageSampler, 2 * kMaxSetsPerFrame},
+            {vk::DescriptorType::eCombinedImageSampler, 3 * kMaxSetsPerFrame},
         };
         for (int f = 0; f < kFramesInFlight; ++f)
             _frameDescPool[f] = _vk.device.createDescriptorPool({{}, kMaxSetsPerFrame, 2, poolSizes});
@@ -160,6 +162,18 @@ bool EngineVulkan::InitPipelineResources()
                                           "tex-staging"))
                 return false;
         }
+
+        // Shadow-map sampler + 1x1 fallback array: binding 5 is statically
+        // used by the lit shaders, so it must reference a valid depth-array
+        // view even before (or without) any shadow depth pass.
+        {
+            vk::SamplerCreateInfo shadowInfo({}, vk::Filter::eNearest, vk::Filter::eNearest,
+                                             vk::SamplerMipmapMode::eNearest, vk::SamplerAddressMode::eClampToEdge,
+                                             vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge);
+            _shadowSampler = _vk.device.createSampler(shadowInfo);
+        }
+        if (!CreateShadowFallbackTexture())
+            return false;
 
         return CreateDepthTarget() && InitShaderModules();
     }
@@ -177,6 +191,7 @@ void EngineVulkan::DestroyPipelineResources()
     _pipelines.clear();
     DestroyShaderModules();
     DestroyDepthTarget();
+    DestroyShadowResources();
     for (auto& pool : _frameDescPool)
     {
         if (pool)
@@ -636,14 +651,20 @@ bool EngineVulkan::WriteConstantsAndBindDescriptors(vk::CommandBuffer cmd)
     // TEXTURE1 keeps the default linear-wrap sampler like GL33 (only slot 0
     // gets the per-draw sampler state).
     const vk::DescriptorImageInfo tex1Info(_samplers[0], tex1, vk::ImageLayout::eShaderReadOnlyOptimal);
+    // Cascade shadow array (binding 5). The real array only after a depth
+    // pass has put it into shader-read layout; the cleared 1x1 fallback
+    // otherwise. shadowCtl.x gates the actual sampling.
+    const vk::ImageView shadowView = (_shadowMapActive && _shadowArrayView) ? _shadowArrayView : _shadowFallbackView;
+    const vk::DescriptorImageInfo shadowInfo(_shadowSampler, shadowView, vk::ImageLayout::eShaderReadOnlyOptimal);
     const vk::WriteDescriptorSet writes[] = {
         {set, 0, 0, 1, vk::DescriptorType::eUniformBufferDynamic, nullptr, &vsInfo},
         {set, 1, 0, 1, vk::DescriptorType::eUniformBufferDynamic, nullptr, &psInfo},
         {set, 2, 0, 1, vk::DescriptorType::eCombinedImageSampler, &texInfo},
         {set, 3, 0, 1, vk::DescriptorType::eCombinedImageSampler, &tex1Info},
         {set, 4, 0, 1, vk::DescriptorType::eUniformBufferDynamic, nullptr, &instInfo},
+        {set, 5, 0, 1, vk::DescriptorType::eCombinedImageSampler, &shadowInfo},
     };
-    _vk.device.updateDescriptorSets(5, writes, 0, nullptr);
+    _vk.device.updateDescriptorSets(6, writes, 0, nullptr);
 
     const uint32_t dynamicOffsets[3] = {(uint32_t)vsOffset, (uint32_t)psOffset, _instOffset};
     cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, _pipelineLayout, 0, set, dynamicOffsets);

@@ -155,7 +155,7 @@ void EngineVulkan::InitDraw(bool clear, PackedColor color)
 
     vk::RenderingAttachmentInfo depthAttachment(_depthView, vk::ImageLayout::eDepthStencilAttachmentOptimal);
     depthAttachment.loadOp = vk::AttachmentLoadOp::eClear;
-    depthAttachment.storeOp = vk::AttachmentStoreOp::eDontCare;
+    depthAttachment.storeOp = vk::AttachmentStoreOp::eStore;
     depthAttachment.clearValue = vk::ClearValue(vk::ClearDepthStencilValue(1.0f, 0));
 
     vk::RenderingInfo renderingInfo({}, vk::Rect2D({0, 0}, _swapchain.extent), 1, 0, colorAttachment);
