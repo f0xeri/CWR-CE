@@ -558,7 +558,7 @@ void EngineVulkan::Draw2D(const PacLevelMem*, PackedColor, float, float, float, 
 
 AbstractTextBank* EngineVulkan::TextBank()
 {
-    return _bank; // TextBankDummy until phase 1 brings TextBankVulkan
+    return _bank; // TextBankVulkan (bootstrap TextBankDummy until the GPU is up)
 }
 
 void EngineVulkan::TextureDestroyed(Texture*) {}

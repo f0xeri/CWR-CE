@@ -135,8 +135,8 @@ void main() {
 // Shared VS UBO declaration for the mesh shaders — byte-identical std140
 // layout to GL33's VSConstants (70 vec4 slots). The world matrix is read from
 // the block itself (slots 8..11): the VK path snapshots the whole block per
-// draw into the UBO ring, so no separate WorldInstances buffer is needed
-// (instancing is a later perf effort; Engine::InstancedRunAdd stays false).
+// draw into the UBO ring; instanced runs read per-instance worlds from the
+// WorldInstances block instead (see VK_WORLD_PUSH_CONSTANT below).
 #define VK_VS_CONSTANTS_BLOCK \
     "layout(set = 0, binding = 0, std140) uniform VSConstants {\n" \
     "    mat4 proj;          // c0-c3\n" \

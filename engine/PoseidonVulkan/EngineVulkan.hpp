@@ -74,8 +74,8 @@ class EngineVulkan : public Engine
     friend class VertexBufferVulkan; // uses the upload ticket + dynamic mesh ring
 
   private:
-    // TODO(vk-phase1): TextBankVulkan; TextBankDummy for now — the producer
-    // layer dereferences TextBank() unconditionally.
+    // TextBankDummy from the ctor until the GPU is up (the producer layer
+    // dereferences TextBank() unconditionally), then swapped for TextBankVulkan.
     AbstractTextBank* _bank;
 
   public:

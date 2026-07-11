@@ -345,8 +345,8 @@ void EngineVulkan::FlushQueues()
     FlushAndFreeAllQueues(_queueNo);
 }
 
-// Per-poly shadow brackets: only flush ordering matters until the stencil
-// path lands in phase 3 (see GL33's comments in EngineGL33_Draw.cpp).
+// Per-poly shadow brackets: flush around them so shadow polys keep their
+// ordering relative to normal draws (see GL33's comments in EngineGL33_Draw.cpp).
 void EngineVulkan::BeginShadowPass()
 {
     FlushAndFreeAllQueues(_queueNo, /*nonEmptyOnly*/ true);

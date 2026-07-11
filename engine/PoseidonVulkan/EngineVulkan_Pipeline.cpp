@@ -63,8 +63,8 @@ bool EngineVulkan::InitPipelineResources()
             _samplers[i] = _vk.device.createSampler(info);
         }
 
-        // 1x1 white texture — stand-in for every real texture until
-        // TextBankVulkan lands; UI quads then render as (vertex color x white).
+        // 1x1 white texture — bound for untextured draws so they render as
+        // (vertex color x white).
         {
             vk::ImageCreateInfo imgInfo({}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, vk::Extent3D(1, 1, 1), 1,
                                         1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
